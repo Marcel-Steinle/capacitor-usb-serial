@@ -32,6 +32,14 @@ import type {
   PurgeHwBuffersOptions,
   SetReadQueueOptions,
   ReadQueueConfig,
+  ListBulkDevicesResult,
+  OpenBulkOptions,
+  OpenBulkResult,
+  BulkRef,
+  BulkInfo,
+  BulkReadOptions,
+  BulkWriteOptions,
+  StartBulkReadingOptions,
 } from './definitions';
 
 /** Error carrying a stable `code`, matching the native rejection contract. */
@@ -58,6 +66,9 @@ export class WebUsbSerial extends WebPlugin implements UsbSerialPlugin {
   listDevices(): Promise<ListDevicesResult> {
     return unsupported();
   }
+  listBulkDevices(): Promise<ListBulkDevicesResult> {
+    return unsupported();
+  }
   registerDriver(_options: RegisterDriverOptions): Promise<void> {
     return unsupported();
   }
@@ -77,6 +88,33 @@ export class WebUsbSerial extends WebPlugin implements UsbSerialPlugin {
     return unsupported();
   }
   getPortInfo(_options: PortRef): Promise<PortInfo> {
+    return unsupported();
+  }
+  openBulk(_options: OpenBulkOptions): Promise<OpenBulkResult> {
+    return unsupported();
+  }
+  closeBulk(_options: BulkRef): Promise<void> {
+    return unsupported();
+  }
+  isBulkOpen(_options: BulkRef): Promise<IsOpenResult> {
+    return unsupported();
+  }
+  getBulkInfo(_options: BulkRef): Promise<BulkInfo> {
+    return unsupported();
+  }
+  bulkRead(_options: BulkReadOptions): Promise<ReadResult> {
+    return unsupported();
+  }
+  bulkWrite(_options: BulkWriteOptions): Promise<WriteResult> {
+    return unsupported();
+  }
+  startBulkReading(_options: StartBulkReadingOptions): Promise<void> {
+    return unsupported();
+  }
+  stopBulkReading(_options: BulkRef): Promise<void> {
+    return unsupported();
+  }
+  getBulkStreamState(_options: BulkRef): Promise<StreamStateResult> {
     return unsupported();
   }
   setParameters(_options: SerialParameters): Promise<void> {

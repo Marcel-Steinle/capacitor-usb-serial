@@ -136,6 +136,40 @@ Flow control: `setFlowControl`, `getFlowControl`, `getSupportedFlowControl`, `ge
 Maintenance: `purgeHwBuffers`, `setBreak`, `setReadQueue`, `getReadQueueConfig`.
 Events: `attached`, `detached`, `data`, `error`.
 
+## Raw USB bulk interfaces
+
+Devices with paired bulk IN/OUT endpoints can be used without a
+`usb-serial-for-android` driver. They do not support serial settings such as baud rate,
+parity, or control lines.
+
+```ts
+const { devices } = await UsbSerial.listBulkDevices();
+const device = devices.find(d => d.vendorId === 0x1bc2 && d.productId === 0x121a);
+if (!device) throw new Error('CBG21A not connected');
+
+if (!device.hasPermission) {
+  const { granted } = await UsbSerial.requestPermission({ deviceId: device.deviceId });
+  if (!granted) throw new Error('USB permission denied');
+}
+
+const { bulkId } = await UsbSerial.openBulk({
+  deviceId: device.deviceId,
+  interfaceNumber: device.interfaceNumber,
+});
+
+const listener = await UsbSerial.addListener('bulkData', event => {
+  if (event.bulkId === bulkId) console.log('RX base64', event.data);
+});
+await UsbSerial.startBulkReading({ bulkId });
+await UsbSerial.bulkWrite({ bulkId, data: btoa('payload') });
+
+// Later: stopBulkReading, listener.remove(), closeBulk.
+```
+
+`listBulkDevices` returns one entry per interface containing both a bulk IN and bulk
+OUT endpoint. `openBulk` automatically selects the first such interface when
+`interfaceNumber` is omitted. Binary data is Base64 encoded, as with serial I/O.
+
 See `src/definitions.ts` for the complete typed contract and error codes.
 
 ## Error codes

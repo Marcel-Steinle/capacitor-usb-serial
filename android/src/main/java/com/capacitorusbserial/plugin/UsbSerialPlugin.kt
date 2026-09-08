@@ -129,6 +129,9 @@ class UsbSerialPlugin : Plugin() {
     fun listDevices(call: PluginCall) = dispatch(call) { impl.listDevices() }
 
     @PluginMethod
+    fun listBulkDevices(call: PluginCall) = dispatch(call) { impl.listBulkDevices() }
+
+    @PluginMethod
     fun registerDriver(call: PluginCall) =
         dispatch(call) {
             impl.registerDriver(
@@ -172,6 +175,40 @@ class UsbSerialPlugin : Plugin() {
 
     @PluginMethod
     fun getPortInfo(call: PluginCall) = dispatch(call) { impl.getPortInfo(call.reqString("portId")) }
+
+    @PluginMethod
+    fun openBulk(call: PluginCall) =
+        dispatch(call) { impl.openBulk(call.reqString("deviceId"), call.getInt("interfaceNumber")) }
+
+    @PluginMethod
+    fun closeBulk(call: PluginCall) = dispatch(call) { impl.closeBulk(call.reqString("bulkId")); null }
+
+    @PluginMethod
+    fun isBulkOpen(call: PluginCall) = dispatch(call) { impl.isBulkOpen(call.reqString("bulkId")) }
+
+    @PluginMethod
+    fun getBulkInfo(call: PluginCall) = dispatch(call) { impl.getBulkInfo(call.reqString("bulkId")) }
+
+    @PluginMethod
+    fun bulkRead(call: PluginCall) =
+        dispatch(call) { impl.bulkRead(call.reqString("bulkId"), call.getInt("length"), call.getInt("timeout")) }
+
+    @PluginMethod
+    fun bulkWrite(call: PluginCall) =
+        dispatch(call) { impl.bulkWrite(call.reqString("bulkId"), call.reqString("data"), call.getInt("timeout")) }
+
+    @PluginMethod
+    fun startBulkReading(call: PluginCall) =
+        dispatch(call) {
+            impl.startBulkReading(call.reqString("bulkId"), call.getInt("bufferSize"), call.getInt("timeout"))
+            null
+        }
+
+    @PluginMethod
+    fun stopBulkReading(call: PluginCall) = dispatch(call) { impl.stopBulkReading(call.reqString("bulkId")); null }
+
+    @PluginMethod
+    fun getBulkStreamState(call: PluginCall) = dispatch(call) { impl.getBulkStreamState(call.reqString("bulkId")) }
 
     // ----------------------------------------------------------------------
     // Task 33 — I/O / config wrappers

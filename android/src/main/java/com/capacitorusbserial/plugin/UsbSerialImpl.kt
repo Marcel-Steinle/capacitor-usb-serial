@@ -3,6 +3,10 @@ package com.capacitorusbserial.plugin
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
@@ -38,6 +42,9 @@ class UsbSerialImpl(
         private const val MAX_READ_BUFFER = 1 shl 20
         private const val DEFAULT_READ_TIMEOUT = 1000
         private const val DEFAULT_WRITE_TIMEOUT = 1000
+        private const val DEFAULT_BULK_BUFFER = 16 * 1024
+        private const val MAX_BULK_BUFFER = 1 shl 20
+        private const val BULK_WRITE_CHUNK = 16 * 1024
         private const val TAG = "UsbSerial"
     }
 
@@ -83,6 +90,56 @@ class UsbSerialImpl(
         }
         return JSObject().put("devices", arr)
     }
+
+    /** Lists raw USB interfaces that expose at least one bulk IN and bulk OUT endpoint. */
+    fun listBulkDevices(): JSObject {
+        val arr = JSArray()
+        for (device in usbManager.deviceList.values) {
+            val deviceId = store.registerDevice(device)
+            for (selection in bulkSelections(device)) {
+                arr.put(
+                    JSObject()
+                        .put("deviceId", deviceId)
+                        .put("vendorId", device.vendorId)
+                        .put("productId", device.productId)
+                        .put("deviceName", device.deviceName)
+                        .put("serialNumber", safeSerial(deviceId, device))
+                        .put("hasPermission", usbManager.hasPermission(device))
+                        .put("interfaceNumber", selection.usbInterface.id)
+                        .put("interfaceClass", selection.usbInterface.interfaceClass)
+                        .put("interfaceSubclass", selection.usbInterface.interfaceSubclass)
+                        .put("interfaceProtocol", selection.usbInterface.interfaceProtocol)
+                        .put("inEndpointAddress", selection.inEndpoint.address)
+                        .put("outEndpointAddress", selection.outEndpoint.address)
+                        .put("inMaxPacketSize", selection.inEndpoint.maxPacketSize)
+                        .put("outMaxPacketSize", selection.outEndpoint.maxPacketSize),
+                )
+            }
+        }
+        return JSObject().put("devices", arr)
+    }
+
+    private data class BulkSelection(
+        val usbInterface: UsbInterface,
+        val inEndpoint: UsbEndpoint,
+        val outEndpoint: UsbEndpoint,
+    )
+
+    private fun bulkSelections(device: UsbDevice): List<BulkSelection> =
+        (0 until device.interfaceCount).mapNotNull { index ->
+            val intf = device.getInterface(index)
+            var input: UsbEndpoint? = null
+            var output: UsbEndpoint? = null
+            for (endpointIndex in 0 until intf.endpointCount) {
+                val endpoint = intf.getEndpoint(endpointIndex)
+                if (endpoint.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                if (endpoint.direction == UsbConstants.USB_DIR_IN && input == null) input = endpoint
+                if (endpoint.direction == UsbConstants.USB_DIR_OUT && output == null) output = endpoint
+            }
+            val inEndpoint = input ?: return@mapNotNull null
+            val outEndpoint = output ?: return@mapNotNull null
+            BulkSelection(intf, inEndpoint, outEndpoint)
+        }
 
     /** getSerial() requires permission and an open-ish handle on some drivers; null-safe. */
     private fun safeSerial(
@@ -239,6 +296,155 @@ class UsbSerialImpl(
         val handle = store.getPortOrNull(portId)
         val open = handle?.port?.isOpen ?: false
         return JSObject().put("isOpen", open)
+    }
+
+    // ----------------------------------------------------------------------
+    // Raw USB bulk lifecycle and I/O
+    // ----------------------------------------------------------------------
+
+    fun openBulk(deviceId: String, interfaceNumber: Int?): JSObject {
+        val device = store.getDevice(deviceId)
+        requirePermission(deviceId, device)
+        val selections = bulkSelections(device)
+        val selection =
+            if (interfaceNumber == null) selections.firstOrNull()
+            else selections.firstOrNull { it.usbInterface.id == interfaceNumber }
+        if (selection == null) {
+            val suffix = interfaceNumber?.let { " on interface $it" } ?: ""
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_PARAMS, "No bulk IN/OUT endpoint pair$suffix")
+        }
+        val connection = usbManager.openDevice(device)
+            ?: throw UsbSerialError(UsbSerialErrorCode.IO_ERROR, "openDevice returned null")
+        if (!connection.claimInterface(selection.usbInterface, true)) {
+            connection.close()
+            throw UsbSerialError(UsbSerialErrorCode.IO_ERROR, "Failed to claim USB interface ${selection.usbInterface.id}")
+        }
+        val handle = store.addBulk(
+            deviceId,
+            device,
+            selection.usbInterface,
+            selection.inEndpoint,
+            selection.outEndpoint,
+            connection,
+            Executors.newSingleThreadExecutor(),
+        )
+        return JSObject().put("bulkId", handle.bulkId)
+    }
+
+    private fun requirePermission(deviceId: String, device: UsbDevice) {
+        if (usbManager.hasPermission(device)) return
+        val code = if (store.wasPermissionRequested(deviceId)) {
+            UsbSerialErrorCode.PERMISSION_DENIED
+        } else {
+            UsbSerialErrorCode.NEEDS_PERMISSION
+        }
+        throw UsbSerialError(code, "USB permission not granted for device $deviceId")
+    }
+
+    fun closeBulk(bulkId: String) {
+        store.getBulk(bulkId)
+        store.reapBulk(bulkId)
+    }
+
+    fun isBulkOpen(bulkId: String): JSObject = JSObject().put("isOpen", store.getBulkOrNull(bulkId) != null)
+
+    fun getBulkInfo(bulkId: String): JSObject {
+        val handle = store.getBulk(bulkId)
+        return JSObject()
+            .put("bulkId", handle.bulkId)
+            .put("deviceId", handle.deviceId)
+            .put("interfaceNumber", handle.usbInterface.id)
+            .put("inEndpointAddress", handle.inEndpoint.address)
+            .put("outEndpointAddress", handle.outEndpoint.address)
+            .put("inMaxPacketSize", handle.inEndpoint.maxPacketSize)
+            .put("outMaxPacketSize", handle.outEndpoint.maxPacketSize)
+    }
+
+    fun bulkRead(bulkId: String, length: Int?, timeout: Int?): JSObject {
+        val size = length ?: DEFAULT_BULK_BUFFER
+        if (size !in 1..MAX_BULK_BUFFER) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_PARAMS, "length must be between 1 and $MAX_BULK_BUFFER")
+        }
+        if (timeout != null && timeout < 0) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_PARAMS, "timeout must be >= 0")
+        }
+        val handle = store.getBulk(bulkId)
+        if (handle.stream.get()?.isRunning() == true) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_STATE, "Cannot read while a bulk stream is active")
+        }
+        val buffer = ByteArray(size)
+        val count = onBulkIo(handle) {
+            handle.connection.bulkTransfer(handle.inEndpoint, buffer, buffer.size, timeout ?: DEFAULT_READ_TIMEOUT)
+        }
+        if (count < 0) {
+            if (isBulkDisconnect(handle)) disconnectBulk(handle)
+            return JSObject().put("data", "")
+        }
+        return JSObject().put("data", if (count == 0) "" else Base64Util.encode(buffer.copyOf(count)))
+    }
+
+    fun bulkWrite(bulkId: String, data: String, timeout: Int?): JSObject {
+        if (timeout != null && timeout < 0) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_PARAMS, "timeout must be >= 0")
+        }
+        val handle = store.getBulk(bulkId)
+        val bytes = Base64Util.decode(data)
+        var written = 0
+        onBulkIo(handle) {
+            while (written < bytes.size) {
+                val chunkSize = minOf(BULK_WRITE_CHUNK, bytes.size - written)
+                val chunk = bytes.copyOfRange(written, written + chunkSize)
+                val count = handle.connection.bulkTransfer(
+                    handle.outEndpoint,
+                    chunk,
+                    chunk.size,
+                    timeout ?: DEFAULT_WRITE_TIMEOUT,
+                )
+                if (count <= 0) throw IOException("Bulk OUT transfer failed after $written bytes")
+                written += count
+            }
+        }
+        return JSObject().put("bytesWritten", written)
+    }
+
+    fun startBulkReading(bulkId: String, bufferSize: Int?, timeout: Int?) {
+        val size = bufferSize ?: DEFAULT_BULK_BUFFER
+        val readTimeout = timeout ?: 100
+        if (size !in 1..MAX_BULK_BUFFER || readTimeout <= 0) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_PARAMS, "bufferSize must be 1..$MAX_BULK_BUFFER and timeout > 0")
+        }
+        val handle = store.getBulk(bulkId)
+        if (handle.stream.get()?.isRunning() == true) {
+            throw UsbSerialError(UsbSerialErrorCode.INVALID_STATE, "Bulk stream already running")
+        }
+        lateinit var manager: BulkStreamManager
+        manager = BulkStreamManager(
+            handle.connection,
+            handle.inEndpoint,
+            size,
+            readTimeout,
+            onData = { emitter("bulkData", JSObject().put("bulkId", bulkId).put("data", Base64Util.encode(it))) },
+            onError = { error ->
+                handle.stream.compareAndSet(manager, null)
+                if (isBulkDisconnect(handle)) {
+                    store.reapDevice(handle.deviceId)
+                    emitter("bulkError", JSObject().put("bulkId", bulkId).put("message", "Device disconnected"))
+                } else {
+                    emitter("bulkError", JSObject().put("bulkId", bulkId).put("message", error.message ?: "Bulk read error"))
+                }
+            },
+        )
+        handle.stream.set(manager)
+        manager.start()
+    }
+
+    fun stopBulkReading(bulkId: String) {
+        store.getBulk(bulkId).stream.getAndSet(null)?.stop()
+    }
+
+    fun getBulkStreamState(bulkId: String): JSObject {
+        val running = store.getBulk(bulkId).stream.get()?.isRunning() == true
+        return JSObject().put("state", if (running) "running" else "stopped")
     }
 
     // ----------------------------------------------------------------------
@@ -537,7 +743,7 @@ class UsbSerialImpl(
 
     fun onDeviceDetached(device: android.hardware.usb.UsbDevice) {
         val deviceId = store.deviceIdFor(device)
-        if (store.hasDevice(deviceId) || store.portsForDevice(deviceId).isNotEmpty()) {
+        if (store.hasDevice(deviceId) || store.portsForDevice(deviceId).isNotEmpty() || store.bulkForDevice(deviceId).isNotEmpty()) {
             store.reapDevice(deviceId)
         }
         failPendingPermissions(deviceId, "Device detached while permission request pending")
@@ -563,6 +769,8 @@ class UsbSerialImpl(
 
     /** Test seam: the store is private and nothing else exposes a [PortHandle]. */
     internal fun portHandleForTest(portId: String): PortHandle = store.getPort(portId)
+
+    internal fun bulkHandleForTest(bulkId: String): BulkHandle = store.getBulk(bulkId)
 
     // ----------------------------------------------------------------------
     // Per-port execution helpers
@@ -607,5 +815,36 @@ class UsbSerialImpl(
                 current.vendorId == dev.vendorId &&
                 current.productId == dev.productId
         return !present || !handle.port.isOpen
+    }
+
+    private fun <T> onBulk(handle: BulkHandle, block: () -> T): T {
+        val future = try {
+            handle.executor.submit(Callable { block() })
+        } catch (e: RejectedExecutionException) {
+            throw UsbSerialError(UsbSerialErrorCode.PORT_NOT_OPEN, "Bulk interface ${handle.bulkId} is closed")
+        }
+        try {
+            return future.get()
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw e.cause ?: e
+        }
+    }
+
+    private fun <T> onBulkIo(handle: BulkHandle, block: () -> T): T =
+        try {
+            onBulk(handle, block)
+        } catch (e: IOException) {
+            if (isBulkDisconnect(handle)) disconnectBulk(handle)
+            throw UsbSerialError(UsbSerialErrorCode.IO_ERROR, e.message ?: "Bulk I/O error")
+        }
+
+    private fun isBulkDisconnect(handle: BulkHandle): Boolean {
+        val current = usbManager.deviceList[handle.device.deviceName]
+        return current == null || current.vendorId != handle.device.vendorId || current.productId != handle.device.productId
+    }
+
+    private fun disconnectBulk(handle: BulkHandle): Nothing {
+        store.reapDevice(handle.deviceId)
+        throw UsbSerialError(UsbSerialErrorCode.DEVICE_DISCONNECTED, "Device disconnected")
     }
 }

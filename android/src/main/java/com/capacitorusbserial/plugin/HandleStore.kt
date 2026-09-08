@@ -2,6 +2,8 @@ package com.capacitorusbserial.plugin
 
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -24,6 +26,18 @@ class PortHandle(
     val stream: AtomicReference<SerialStreamManager?> = AtomicReference(null),
 )
 
+class BulkHandle(
+    val bulkId: String,
+    val deviceId: String,
+    val device: UsbDevice,
+    val usbInterface: UsbInterface,
+    val inEndpoint: UsbEndpoint,
+    val outEndpoint: UsbEndpoint,
+    val connection: UsbDeviceConnection,
+    val executor: ExecutorService,
+    val stream: AtomicReference<BulkStreamManager?> = AtomicReference(null),
+)
+
 /**
  * Single owner of deviceId/portId handles. Thread-safe. Nothing else in the plugin
  * generates or reaps IDs.
@@ -36,8 +50,10 @@ class PortHandle(
 class HandleStore {
     private val devices = ConcurrentHashMap<String, UsbDevice>()
     private val ports = ConcurrentHashMap<String, PortHandle>()
+    private val bulkHandles = ConcurrentHashMap<String, BulkHandle>()
     private val requestedPermission: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val portSeq = AtomicLong(0)
+    private val bulkSeq = AtomicLong(0)
 
     // --- Device registry (keyed by a stable per-attachment id) ---
 
@@ -84,6 +100,34 @@ class HandleStore {
 
     fun getPortOrNull(portId: String): PortHandle? = ports[portId]
 
+    fun addBulk(
+        deviceId: String,
+        device: UsbDevice,
+        usbInterface: UsbInterface,
+        inEndpoint: UsbEndpoint,
+        outEndpoint: UsbEndpoint,
+        connection: UsbDeviceConnection,
+        executor: ExecutorService,
+    ): BulkHandle {
+        val bulkId = "bulk_${bulkSeq.incrementAndGet()}"
+        return BulkHandle(bulkId, deviceId, device, usbInterface, inEndpoint, outEndpoint, connection, executor)
+            .also { bulkHandles[bulkId] = it }
+    }
+
+    fun getBulk(bulkId: String): BulkHandle =
+        bulkHandles[bulkId]
+            ?: throw UsbSerialError(UsbSerialErrorCode.PORT_NOT_OPEN, "No open bulk interface for id $bulkId")
+
+    fun getBulkOrNull(bulkId: String): BulkHandle? = bulkHandles[bulkId]
+
+    fun reapBulk(bulkId: String) {
+        val handle = bulkHandles.remove(bulkId) ?: return
+        runCatching { handle.stream.getAndSet(null)?.stop() }
+        runCatching { handle.connection.releaseInterface(handle.usbInterface) }
+        runCatching { handle.connection.close() }
+        runCatching { handle.executor.shutdownNow() }
+    }
+
     /** Stop+close+reap a single port handle. Safe to call more than once. */
     fun reapPort(portId: String) {
         val handle = ports.remove(portId) ?: return
@@ -97,16 +141,22 @@ class HandleStore {
         ports.values
             .filter { it.deviceId == deviceId }
             .forEach { reapPort(it.portId) }
+        bulkHandles.values
+            .filter { it.deviceId == deviceId }
+            .forEach { reapBulk(it.bulkId) }
     }
 
     /** Reap everything (plugin teardown). */
     fun reapAll() {
         ports.keys.toList().forEach { reapPort(it) }
+        bulkHandles.keys.toList().forEach { reapBulk(it) }
         devices.clear()
         requestedPermission.clear()
     }
 
     fun portsForDevice(deviceId: String): List<PortHandle> = ports.values.filter { it.deviceId == deviceId }
+
+    fun bulkForDevice(deviceId: String): List<BulkHandle> = bulkHandles.values.filter { it.deviceId == deviceId }
 
     private fun closeHandle(handle: PortHandle) {
         runCatching { handle.stream.get()?.stop() }

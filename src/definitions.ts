@@ -60,6 +60,63 @@ export interface ListDevicesResult {
   devices: SerialDeviceInfo[];
 }
 
+export interface BulkDeviceInfo {
+  deviceId: string;
+  vendorId: number;
+  productId: number;
+  deviceName: string;
+  serialNumber: string | null;
+  hasPermission: boolean;
+  interfaceNumber: number;
+  interfaceClass: number;
+  interfaceSubclass: number;
+  interfaceProtocol: number;
+  inEndpointAddress: number;
+  outEndpointAddress: number;
+  inMaxPacketSize: number;
+  outMaxPacketSize: number;
+}
+
+export interface ListBulkDevicesResult {
+  devices: BulkDeviceInfo[];
+}
+export interface OpenBulkOptions {
+  deviceId: string;
+  interfaceNumber?: number;
+}
+export interface OpenBulkResult {
+  bulkId: string;
+}
+export interface BulkRef {
+  bulkId: string;
+}
+export interface BulkInfo extends BulkRef {
+  deviceId: string;
+  interfaceNumber: number;
+  inEndpointAddress: number;
+  outEndpointAddress: number;
+  inMaxPacketSize: number;
+  outMaxPacketSize: number;
+}
+export interface BulkReadOptions extends BulkRef {
+  length?: number;
+  timeout?: number;
+}
+export interface BulkWriteOptions extends BulkRef {
+  data: string;
+  timeout?: number;
+}
+export interface StartBulkReadingOptions extends BulkRef {
+  bufferSize?: number;
+  timeout?: number;
+}
+export interface BulkDataEvent extends BulkRef {
+  data: string;
+}
+export interface BulkErrorEvent extends BulkRef {
+  message: string;
+}
+
 export interface RegisterDriverOptions {
   vendorId: number;
   productId: number;
@@ -252,6 +309,7 @@ export interface DetachedEvent {
 export interface UsbSerialPlugin extends Plugin {
   // Discovery & prober
   listDevices(): Promise<ListDevicesResult>;
+  listBulkDevices(): Promise<ListBulkDevicesResult>;
   registerDriver(options: RegisterDriverOptions): Promise<void>;
 
   // Permission
@@ -269,6 +327,17 @@ export interface UsbSerialPlugin extends Plugin {
   close(options: PortRef): Promise<void>;
   isOpen(options: PortRef): Promise<IsOpenResult>;
   getPortInfo(options: PortRef): Promise<PortInfo>;
+
+  // Raw USB bulk interfaces (independent of usb-serial-for-android drivers)
+  openBulk(options: OpenBulkOptions): Promise<OpenBulkResult>;
+  closeBulk(options: BulkRef): Promise<void>;
+  isBulkOpen(options: BulkRef): Promise<IsOpenResult>;
+  getBulkInfo(options: BulkRef): Promise<BulkInfo>;
+  bulkRead(options: BulkReadOptions): Promise<ReadResult>;
+  bulkWrite(options: BulkWriteOptions): Promise<WriteResult>;
+  startBulkReading(options: StartBulkReadingOptions): Promise<void>;
+  stopBulkReading(options: BulkRef): Promise<void>;
+  getBulkStreamState(options: BulkRef): Promise<StreamStateResult>;
 
   // Parameters
   setParameters(options: SerialParameters): Promise<void>;
@@ -319,6 +388,14 @@ export interface UsbSerialPlugin extends Plugin {
   getReadQueueConfig(options: PortRef): Promise<ReadQueueConfig>;
 
   // Events
+  addListener(
+    eventName: 'bulkData',
+    listenerFunc: (event: BulkDataEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'bulkError',
+    listenerFunc: (event: BulkErrorEvent) => void,
+  ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'data',
     listenerFunc: (event: DataEvent) => void,

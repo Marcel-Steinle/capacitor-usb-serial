@@ -3,6 +3,9 @@ package com.capacitorusbserial.plugin
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
+import android.hardware.usb.UsbConstants
+import android.hardware.usb.UsbEndpoint
+import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import com.getcapacitor.JSObject
 import com.hoho.android.usbserial.driver.FtdiSerialDriver
@@ -112,6 +115,53 @@ class UsbSerialImplTest {
 
     private fun openPort(f: Fixture): String = impl.open(f.deviceId, 0).getString("portId")!!
 
+    private class BulkFixture(
+        val deviceId: String,
+        val device: UsbDevice,
+        val usbInterface: UsbInterface,
+        val input: UsbEndpoint,
+        val output: UsbEndpoint,
+        val connection: UsbDeviceConnection,
+    )
+
+    private fun registerBulkDevice(hasPermission: Boolean = true): BulkFixture {
+        val device = mock(UsbDevice::class.java)
+        `when`(device.deviceId).thenReturn(9)
+        `when`(device.deviceName).thenReturn("/dev/bus/usb/001/009")
+        `when`(device.vendorId).thenReturn(0x1bc2)
+        `when`(device.productId).thenReturn(0x121a)
+
+        val intf = mock(UsbInterface::class.java)
+        `when`(intf.id).thenReturn(0)
+        `when`(intf.interfaceClass).thenReturn(0xff)
+        `when`(intf.interfaceSubclass).thenReturn(0xff)
+        `when`(intf.interfaceProtocol).thenReturn(0xff)
+        `when`(intf.endpointCount).thenReturn(2)
+
+        val output = mock(UsbEndpoint::class.java)
+        `when`(output.type).thenReturn(UsbConstants.USB_ENDPOINT_XFER_BULK)
+        `when`(output.direction).thenReturn(UsbConstants.USB_DIR_OUT)
+        `when`(output.address).thenReturn(0x01)
+        `when`(output.maxPacketSize).thenReturn(512)
+        val input = mock(UsbEndpoint::class.java)
+        `when`(input.type).thenReturn(UsbConstants.USB_ENDPOINT_XFER_BULK)
+        `when`(input.direction).thenReturn(UsbConstants.USB_DIR_IN)
+        `when`(input.address).thenReturn(0x81)
+        `when`(input.maxPacketSize).thenReturn(512)
+        `when`(intf.getEndpoint(0)).thenReturn(output)
+        `when`(intf.getEndpoint(1)).thenReturn(input)
+        `when`(device.interfaceCount).thenReturn(1)
+        `when`(device.getInterface(0)).thenReturn(intf)
+
+        val connection = mock(UsbDeviceConnection::class.java)
+        `when`(connection.claimInterface(intf, true)).thenReturn(true)
+        `when`(usbManager.hasPermission(device)).thenReturn(hasPermission)
+        `when`(usbManager.openDevice(device)).thenReturn(connection)
+        `when`(usbManager.deviceList).thenReturn(hashMapOf(device.deviceName to device))
+        val info = impl.listBulkDevices().getJSONArray("devices").getJSONObject(0)
+        return BulkFixture(info.getString("deviceId")!!, device, intf, input, output, connection)
+    }
+
     private fun b64(bytes: ByteArray): String = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
 
     // --- discovery ---------------------------------------------------------
@@ -131,6 +181,41 @@ class UsbSerialImplTest {
     fun listDevicesEmptyWhenNonePresent() {
         `when`(prober.findAllDrivers(usbManager)).thenReturn(emptyList())
         assertEquals(0, impl.listDevices().getJSONArray("devices").length())
+    }
+
+    @Test
+    fun listBulkDevicesFindsCbg21aEndpointsWithoutSerialDriver() {
+        val f = registerBulkDevice()
+        val info = impl.listBulkDevices().getJSONArray("devices").getJSONObject(0)
+        assertEquals(f.deviceId, info.getString("deviceId"))
+        assertEquals(0x1bc2, info.getInt("vendorId"))
+        assertEquals(0x121a, info.getInt("productId"))
+        assertEquals(0, info.getInt("interfaceNumber"))
+        assertEquals(0x81, info.getInt("inEndpointAddress"))
+        assertEquals(0x01, info.getInt("outEndpointAddress"))
+        assertEquals(512, info.getInt("inMaxPacketSize"))
+    }
+
+    @Test
+    fun openAndCloseBulkClaimsAndReleasesInterface() {
+        val f = registerBulkDevice()
+        val bulkId = impl.openBulk(f.deviceId, 0).getString("bulkId")!!
+        assertTrue(bulkId.startsWith("bulk_"))
+        verify(f.connection).claimInterface(f.usbInterface, true)
+        impl.closeBulk(bulkId)
+        verify(f.connection).releaseInterface(f.usbInterface)
+        verify(f.connection).close()
+    }
+
+    @Test
+    fun openBulkRequiresPermission() {
+        val f = registerBulkDevice(hasPermission = false)
+        try {
+            impl.openBulk(f.deviceId, 0)
+            fail("expected NEEDS_PERMISSION")
+        } catch (e: UsbSerialError) {
+            assertEquals(UsbSerialErrorCode.NEEDS_PERMISSION, e.code)
+        }
     }
 
     // --- permission gating -------------------------------------------------
