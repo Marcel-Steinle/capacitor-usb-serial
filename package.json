@@ -51,7 +51,8 @@
     "test": "jest",
     "build": "npm run clean && tsc && rollup -c rollup.config.js",
     "clean": "rimraf ./dist",
-    "watch": "tsc --watch"
+    "watch": "tsc --watch",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@capacitor/android": "^7.6.6",
